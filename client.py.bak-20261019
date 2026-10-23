@@ -1,0 +1,166 @@
+
+import asyncio
+import base64
+import json
+import os
+
+import httpx
+import websockets
+
+TUNNEL_URL = os.environ.get("TUNNEL_URL", "https://tunnel-8fvo.onrender.com").rstrip("/")
+AGENT_TOKEN = os.environ.get("TUNNEL_AGENT_TOKEN", "")
+LOCAL_TARGET = os.environ.get("LOCAL_TARGET", "http://127.0.0.1:5000").rstrip("/")
+
+MAX_BODY = 2 * 1024 * 1024
+CHUNK_SIZE = 64 * 1024
+send_lock = asyncio.Lock()
+
+
+async def handle_request(ws, client, item):
+    request_id = item.get("id", "")
+    response_started = False
+
+    try:
+        body = base64.b64decode(item.get("body", ""), validate=True)
+        if len(body) > MAX_BODY:
+            raise ValueError("Request body too large")
+
+        method = item.get("method", "GET").upper()
+        allowed = {
+            "GET", "POST", "PUT", "PATCH",
+            "DELETE", "OPTIONS", "HEAD",
+        }
+        if method not in allowed:
+            raise ValueError("Unsupported method")
+
+        path = item.get("path", "/")
+        if not path.startswith("/") or path.startswith("//"):
+            raise ValueError("Invalid path")
+
+        query = item.get("query", "")
+        url = LOCAL_TARGET + path
+        if query:
+            url += "?" + query
+
+        headers = []
+        blocked = {
+            "host", "authorization", "cookie", "connection",
+            "content-length", "transfer-encoding", "upgrade",
+            "proxy-authorization",
+        }
+
+        item_headers = item.get("headers", [])
+        if isinstance(item_headers, dict):
+            item_headers = item_headers.items()
+        for name, value in item_headers:
+            if name.lower() not in blocked:
+                headers.append((name, value))
+
+        async with client.stream(
+            method,
+            url,
+            headers=headers,
+            content=body,
+            follow_redirects=False,
+        ) as response:
+            response_headers = [
+                [name, value] for name, value in response.headers.multi_items()
+                if name.lower() not in {
+                    "connection", "transfer-encoding", "content-length",
+                    "set-cookie", "keep-alive", "upgrade",
+                }
+            ]
+            await send_message(ws, {
+                "id": request_id,
+                "type": "start",
+                "status": response.status_code,
+                "headers": response_headers,
+            })
+            response_started = True
+            async for chunk in response.aiter_raw(chunk_size=CHUNK_SIZE):
+                if chunk:
+                    await send_message(ws, {
+                        "id": request_id,
+                        "type": "chunk",
+                        "body": base64.b64encode(chunk).decode("ascii"),
+                    })
+            await send_message(ws, {"id": request_id, "type": "end"})
+
+    except Exception as exc:
+        try:
+            if not response_started:
+                await send_message(ws, {
+                    "id": request_id,
+                    "type": "start",
+                    "status": 502,
+                    "headers": [["content-type", "text/plain; charset=utf-8"]],
+                })
+            await send_message(ws, {
+                "id": request_id,
+                "type": "chunk",
+                "body": base64.b64encode(("Local request failed: " + str(exc)).encode()).decode("ascii"),
+            })
+            await send_message(ws, {"id": request_id, "type": "end"})
+        except Exception:
+            pass
+
+
+async def send_message(ws, message):
+    async with send_lock:
+        await ws.send(json.dumps(message))
+
+
+async def run():
+    if not TUNNEL_URL.startswith("https://"):
+        raise RuntimeError("TUNNEL_URL must start with https://")
+    if not AGENT_TOKEN:
+        raise RuntimeError("Set TUNNEL_AGENT_TOKEN first")
+
+    ws_url = TUNNEL_URL.replace("https://", "wss://", 1)
+    ws_url += "/_tunnel/agent"
+
+    timeout = httpx.Timeout(connect=15, read=None, write=30, pool=15)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        while True:
+            try:
+                print("Connecting to", ws_url)
+
+                async with websockets.connect(
+                    ws_url,
+                    additional_headers={
+                        "Authorization": f"Bearer {AGENT_TOKEN}"
+                    },
+                    ping_interval=20,
+                    ping_timeout=20,
+                    max_size=4 * 1024 * 1024,
+                ) as ws:
+                    print("Tunnel connected")
+
+                    tasks = set()
+                    async for raw in ws:
+                        item = json.loads(raw)
+                        task = asyncio.create_task(
+                            handle_request(ws, client, item)
+                        )
+                        tasks.add(task)
+                        task.add_done_callback(tasks.discard)
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                response = getattr(exc, "response", None)
+                if getattr(response, "status_code", None) in {401, 403}:
+                    print("Authentication rejected (HTTP 403).")
+                    print(
+                        "Check that TUNNEL_AGENT_TOKEN matches the value "
+                        "configured on the Render service, then restart it."
+                    )
+                    return
+
+                print("Disconnected:", repr(exc))
+                print("Retrying in 3 seconds...")
+                await asyncio.sleep(3)
+
+
+if __name__ == "__main__":
+    asyncio.run(run())

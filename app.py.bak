@@ -1,0 +1,225 @@
+
+import asyncio
+import base64
+import hmac
+import json
+import os
+import time
+import uuid
+
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import Response, StreamingResponse
+from oauth import install_oauth
+
+app = FastAPI(title="PAO Tunnel Relay")
+
+AGENT_TOKEN = os.environ.get("TUNNEL_AGENT_TOKEN", "")
+PUBLIC_BASE_URL = os.environ.get(
+    "PUBLIC_BASE_URL", "https://tunnel-8fvo.onrender.com"
+).rstrip("/")
+RESOURCE_URL = PUBLIC_BASE_URL + "/t/mcp/nexa"
+RESOURCE_METADATA_URL = PUBLIC_BASE_URL + "/.well-known/oauth-protected-resource/t/mcp/nexa"
+DEFAULT_TARGET = os.environ.get("DEFAULT_LOCAL_TARGET", "default").strip() or "default"
+access_tokens = install_oauth(app)
+
+MAX_BODY = 2 * 1024 * 1024
+REQUEST_TIMEOUT = 120
+HOP_HEADERS = {
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailer", "transfer-encoding", "upgrade", "content-length",
+}
+
+agent_ws = None
+agent_lock = asyncio.Lock()
+request_queue = asyncio.Queue(maxsize=100)
+pending = {}
+
+
+def authorized(value, expected):
+    return bool(expected) and hmac.compare_digest(value, expected)
+
+
+def bearer(request):
+    value = request.headers.get("authorization", "")
+    if value.lower().startswith("bearer "):
+        return value[7:].strip()
+    return ""
+
+
+@app.get("/health")
+async def health():
+    connected = agent_ws is not None
+    return {
+        "status": "ok",
+        "agent_connected": connected,
+        "pending_requests": len(pending),
+    }
+
+
+@app.websocket("/_tunnel/agent")
+async def agent_endpoint(ws: WebSocket):
+    global agent_ws
+
+    token = ws.headers.get("authorization", "")
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+
+    if not authorized(token, AGENT_TOKEN):
+        await ws.close(code=1008, reason="Unauthorized")
+        return
+
+    await ws.accept()
+
+    async with agent_lock:
+        previous = agent_ws
+        agent_ws = ws
+
+    if previous is not None and previous is not ws:
+        try:
+            await previous.close(code=1000, reason="Replaced")
+        except Exception:
+            pass
+
+    async def sender():
+        while True:
+            item = await request_queue.get()
+            try:
+                if item["id"] not in pending:
+                    continue
+                await ws.send_text(json.dumps(item))
+            finally:
+                request_queue.task_done()
+
+    send_task = asyncio.create_task(sender())
+
+    try:
+        while True:
+            message = json.loads(await ws.receive_text())
+            request_id = message.get("id")
+            response_queue = pending.get(request_id)
+            if response_queue is not None:
+                await response_queue.put(message)
+
+    except (WebSocketDisconnect, ValueError, RuntimeError):
+        pass
+    finally:
+        send_task.cancel()
+        try:
+            await send_task
+        except asyncio.CancelledError:
+            pass
+
+        async with agent_lock:
+            if agent_ws is ws:
+                agent_ws = None
+
+
+@app.api_route("/t", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
+@app.api_route("/t/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
+async def tunnel(request: Request, path: str = ""):
+    token_record = access_tokens.get(bearer(request))
+    if (
+        token_record is None
+        or token_record["expires_at"] < time.time()
+        or token_record["resource"] != RESOURCE_URL
+        or token_record["scope"] != "mcp"
+    ):
+        return Response(
+            "Unauthorized",
+            status_code=401,
+            headers={
+                "WWW-Authenticate": f'Bearer resource_metadata="{RESOURCE_METADATA_URL}", scope="mcp"',
+                "Cache-Control": "no-store",
+            },
+        )
+    # Keep the original MCP route working. Additional local services use:
+    # /t/ports/{target}/{local-path}. The target is a logical allow-listed name,
+    # never a caller-supplied URL or arbitrary port number.
+    if path == "mcp/nexa":
+        target = DEFAULT_TARGET
+        local_path = "/mcp/nexa"
+    elif path.startswith("ports/"):
+        parts = path.split("/", 2)
+        if len(parts) < 2 or not parts[1] or any(
+            not (ch.isalnum() or ch in "-_.") for ch in parts[1]
+        ):
+            raise HTTPException(status_code=404, detail="Unknown tunnel target")
+        target = parts[1]
+        local_path = "/" + parts[2] if len(parts) == 3 and parts[2] else "/"
+    else:
+        raise HTTPException(status_code=404, detail="Unknown tunnel resource")
+
+    permitted_targets = token_record.get("targets", [DEFAULT_TARGET])
+    if target not in permitted_targets:
+        raise HTTPException(status_code=403, detail="Target not permitted for this OAuth token")
+
+    if agent_ws is None:
+        raise HTTPException(status_code=503, detail="Tunnel client offline")
+
+    body = await request.body()
+    if len(body) > MAX_BODY:
+        raise HTTPException(status_code=413, detail="Body too large (2 MiB max)")
+
+    request_id = uuid.uuid4().hex
+    response_queue = asyncio.Queue(maxsize=32)
+    pending[request_id] = response_queue
+
+    forwarded_headers = []
+    blocked = HOP_HEADERS | {"host", "authorization", "cookie", "proxy-authorization"}
+    for raw_name, raw_value in request.headers.raw:
+        name = raw_name.decode("latin-1")
+        value = raw_value.decode("latin-1")
+        if name.lower() not in blocked:
+            forwarded_headers.append((name, value))
+
+    item = {
+        "id": request_id,
+        "method": request.method,
+        "target": target,
+        "path": local_path,
+        "query": str(request.url.query),
+        "headers": forwarded_headers,
+        "body": base64.b64encode(body).decode("ascii"),
+    }
+
+    try:
+        request_queue.put_nowait(item)
+    except asyncio.QueueFull:
+        raise HTTPException(status_code=503, detail="Tunnel queue full")
+
+    try:
+        first = await asyncio.wait_for(response_queue.get(), timeout=REQUEST_TIMEOUT)
+    except asyncio.TimeoutError:
+        pending.pop(request_id, None)
+        raise HTTPException(status_code=504, detail="Local service timeout")
+
+    if first.get("type") != "start":
+        pending.pop(request_id, None)
+        raise HTTPException(status_code=502, detail="Invalid tunnel response")
+
+    status = int(first.get("status", 502))
+    if status < 100 or status > 599:
+        status = 502
+
+    safe_headers = {}
+    headers = first.get("headers", [])
+    if isinstance(headers, dict):
+        headers = headers.items()
+    for name, value in headers:
+        if name.lower() not in HOP_HEADERS | {"set-cookie"}:
+            safe_headers[name] = value
+
+    async def stream_response():
+        try:
+            while True:
+                result = await asyncio.wait_for(
+                    response_queue.get(), timeout=REQUEST_TIMEOUT
+                )
+                if result.get("type") == "end":
+                    break
+                if result.get("type") == "chunk":
+                    yield base64.b64decode(result.get("body", ""), validate=True)
+        finally:
+            pending.pop(request_id, None)
+
+    return StreamingResponse(stream_response(), status_code=status, headers=safe_headers)

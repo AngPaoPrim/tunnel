@@ -1,0 +1,2 @@
+MCP file-write test
+Created via NEXA MCP tool.
