@@ -157,6 +157,9 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
                 authorization_server = await render_client.get(
                     "/.well-known/oauth-authorization-server"
                 )
+                resource_authorization_server = await render_client.get(
+                    "/.well-known/oauth-authorization-server/t/mcp/nexa"
+                )
 
         self.assertEqual(protected.json()["resource"], render_url + "/t/mcp/nexa")
         self.assertEqual(
@@ -167,6 +170,8 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             metadata["registration_endpoint"], render_url + "/oauth/register"
         )
+        self.assertEqual(resource_authorization_server.status_code, 200)
+        self.assertEqual(resource_authorization_server.json(), metadata)
 
     async def test_static_registration_and_authorization_reject_redirect_mismatch(self):
         wrong_redirect = REDIRECT_URI + "/"
