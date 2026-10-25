@@ -12,7 +12,7 @@ from unittest.mock import patch
 import httpx
 from fastapi import FastAPI
 
-from oauth import install_oauth
+from oauth import install_oauth, public_base_url
 from oauth_store import SQLiteMapping
 
 
@@ -133,6 +133,40 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(dynamic_authorization.status_code, 200)
         self.assertEqual(static_authorization.status_code, 200)
+
+    async def test_render_external_url_is_used_for_oauth_metadata(self):
+        render_url = "https://new-service.onrender.com"
+        with tempfile.TemporaryDirectory() as storage_dir, patch.dict(
+            os.environ,
+            {
+                "PUBLIC_BASE_URL": "",
+                "RENDER_EXTERNAL_URL": render_url,
+                "OAUTH_DB_PATH": os.path.join(storage_dir, "oauth.sqlite3"),
+            },
+        ):
+            self.assertEqual(public_base_url(), render_url)
+            render_app = FastAPI()
+            install_oauth(render_app)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=render_app),
+                base_url="http://test",
+            ) as render_client:
+                protected = await render_client.get(
+                    "/.well-known/oauth-protected-resource/t/mcp/nexa"
+                )
+                authorization_server = await render_client.get(
+                    "/.well-known/oauth-authorization-server"
+                )
+
+        self.assertEqual(protected.json()["resource"], render_url + "/t/mcp/nexa")
+        self.assertEqual(
+            protected.json()["authorization_servers"], [render_url]
+        )
+        metadata = authorization_server.json()
+        self.assertEqual(metadata["issuer"], render_url)
+        self.assertEqual(
+            metadata["registration_endpoint"], render_url + "/oauth/register"
+        )
 
     async def test_static_registration_and_authorization_reject_redirect_mismatch(self):
         wrong_redirect = REDIRECT_URI + "/"

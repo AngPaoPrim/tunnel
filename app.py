@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
-from oauth import install_oauth
+from oauth import install_oauth, public_base_url
 from oauth_store import SQLiteMapping
 
 render_env_file = Path("/etc/secrets/.env")
@@ -25,9 +25,7 @@ load_dotenv(override=False)
 app = FastAPI(title="PAO Tunnel Relay")
 
 AGENT_TOKEN = os.environ.get("TUNNEL_AGENT_TOKEN", "")
-PUBLIC_BASE_URL = os.environ.get(
-    "PUBLIC_BASE_URL", "https://tunnel-8fvo.onrender.com"
-).rstrip("/")
+PUBLIC_BASE_URL = public_base_url()
 RESOURCE_URL = PUBLIC_BASE_URL + "/t/mcp/nexa"
 RESOURCE_METADATA_URL = PUBLIC_BASE_URL + "/.well-known/oauth-protected-resource/t/mcp/nexa"
 DEFAULT_TARGET = os.environ.get("DEFAULT_LOCAL_TARGET", "default").strip() or "default"

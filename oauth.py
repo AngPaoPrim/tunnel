@@ -15,10 +15,16 @@ from oauth_store import SQLiteMapping
 logger = logging.getLogger(__name__)
 
 
-def install_oauth(app: FastAPI) -> dict[str, dict]:
-    base_url = os.environ.get(
-        "PUBLIC_BASE_URL", "https://tunnel-8fvo.onrender.com"
+def public_base_url() -> str:
+    return (
+        os.environ.get("PUBLIC_BASE_URL")
+        or os.environ.get("RENDER_EXTERNAL_URL")
+        or "https://tunnel-8fvo.onrender.com"
     ).rstrip("/")
+
+
+def install_oauth(app: FastAPI) -> dict[str, dict]:
+    base_url = public_base_url()
     issuer = base_url
     resource = base_url + "/t/mcp/nexa"
     resource_metadata_url = base_url + "/.well-known/oauth-protected-resource/t/mcp/nexa"
