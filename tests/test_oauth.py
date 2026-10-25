@@ -293,7 +293,7 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
             "/oauth/authorize",
             params={
                 "client_id": "unknown-client",
-                "redirect_uri": REDIRECT_URI,
+                "redirect_uri": REDIRECT_URI + "/unregistered",
                 "response_type": "code",
             },
         )
@@ -322,6 +322,19 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(invalid_refresh.json()["error"], "invalid_grant")
+
+    async def test_missing_public_client_is_restored_for_configured_redirect(self):
+        client_id = "chatgpt-public-client"
+        authorization, code = await self.authorize(client_id=client_id)
+
+        self.assertEqual(authorization.status_code, 200)
+        self.assertIsNotNone(code)
+
+        exchanged = await self.client.post(
+            "/oauth/token",
+            data=self.token_form(code, client_id=client_id, secret=None),
+        )
+        self.assertEqual(exchanged.status_code, 200)
 
     async def test_mcp_bearer_validation_and_target_permissions(self):
         with patch.dict(

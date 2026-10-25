@@ -58,18 +58,20 @@ def install_oauth(app: FastAPI) -> dict[str, dict]:
             "localhost", "127.0.0.1", "::1"
         }
 
-    static_client_configured = bool(static_client_id and static_redirect_uris)
+    configured_redirects = [
+        uri.strip() for uri in static_redirect_uris.splitlines() if uri.strip()
+    ]
+    if configured_redirects and (
+        any(not allowed_redirect(uri) for uri in configured_redirects)
+        or len(set(configured_redirects)) != len(configured_redirects)
+    ):
+        raise RuntimeError("OAUTH_REDIRECT_URIS must contain unique valid callback URLs.")
+
+    static_client_configured = bool(static_client_id and configured_redirects)
     if static_client_configured:
-        redirects = [uri.strip() for uri in static_redirect_uris.splitlines() if uri.strip()]
-        if (
-            not redirects
-            or any(not allowed_redirect(uri) for uri in redirects)
-            or len(set(redirects)) != len(redirects)
-        ):
-            raise RuntimeError("OAUTH_REDIRECT_URIS must contain unique valid callback URLs.")
         static_client = {
             "client_id": static_client_id,
-            "redirect_uris": redirects,
+            "redirect_uris": configured_redirects,
             "client_name": "ChatGPT",
             "token_endpoint_auth_method": (
                 "client_secret_post" if static_client_secret else "none"
@@ -80,7 +82,7 @@ def install_oauth(app: FastAPI) -> dict[str, dict]:
         clients[static_client_id] = static_client
         logger.info(
             "OAuth static client loaded (redirect_count=%d, auth_method=%s)",
-            len(redirects),
+            len(configured_redirects),
             static_client["token_endpoint_auth_method"],
         )
     elif any((static_client_id, static_client_secret, static_redirect_uris)):
@@ -183,6 +185,23 @@ def install_oauth(app: FastAPI) -> dict[str, dict]:
         requested_client_id = params.get("client_id", "")
         client = clients.get(requested_client_id)
         redirect_uri = params.get("redirect_uri", "")
+        if client is None:
+            if (
+                requested_client_id
+                and len(requested_client_id) <= 128
+                and all(0x21 <= ord(char) <= 0x7E for char in requested_client_id)
+                and redirect_uri in configured_redirects
+            ):
+                client = {
+                    "client_id": requested_client_id,
+                    "redirect_uris": configured_redirects,
+                    "client_name": "Recovered public client",
+                    "token_endpoint_auth_method": "none",
+                }
+                clients[requested_client_id] = client
+                logger.info(
+                    "OAuth public client restored from configured redirect URI"
+                )
         if client is None:
             matches_static_client = bool(static_client_id) and hmac.compare_digest(
                 requested_client_id, static_client_id
