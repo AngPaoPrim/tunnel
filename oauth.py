@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 def install_oauth(app: FastAPI) -> dict[str, dict]:
     base_url = os.environ.get(
-        "PUBLIC_BASE_URL", "https://tunnel-8fvo.onrender.com"
+        "PUBLIC_BASE_URL", "https://tunnell.de.deplexo.com"
     ).rstrip("/")
     issuer = base_url
     resource = base_url + "/t/mcp/nexa"
