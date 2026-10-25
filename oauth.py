@@ -131,6 +131,7 @@ def install_oauth(app: FastAPI) -> dict[str, dict]:
 
     @app.get("/.well-known/oauth-authorization-server")
     @app.get("/.well-known/oauth-authorization-server/t/mcp/nexa")
+    @app.get("/.well-known/openid-configuration")
     async def authorization_server_metadata():
         return {
             "issuer": issuer,
