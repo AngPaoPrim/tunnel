@@ -20,7 +20,7 @@ from oauth_store import SQLiteMapping
 render_env_file = Path("/etc/secrets/.env")
 if render_env_file.is_file():
     load_dotenv(render_env_file, override=True)
-load_dotenv(override=True)
+load_dotenv(override=False)
 
 app = FastAPI(title="PAO Tunnel Relay")
 

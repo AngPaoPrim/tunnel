@@ -1,0 +1,11 @@
+.env
+.env.*
+.git
+.venv
+.venv_*
+venv
+__pycache__
+*.py[cod]
+*.bak
+*.bak-*
+oauth.sqlite3*

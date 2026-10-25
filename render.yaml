@@ -2,23 +2,6 @@
 services:
   - type: web
     name: pao-tunnel-relay
-    runtime: python
+    runtime: docker
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
-    envVars:
-      - key: TUNNEL_AGENT_TOKEN
-        sync: false
-      - key: OAUTH_USERNAME
-        sync: false
-      - key: OAUTH_PASSWORD
-        sync: false
-      - key: OAUTH_CLIENT_ID
-        value: Xn7WT_KbEZHmS_vgqbpMRodrjLrrBPIm
-      - key: OAUTH_REDIRECT_URIS
-        value: https://chatgpt.com/connector/oauth/1DlruA5mlFg4
-      - key: OAUTH_DB_PATH
-        value: /var/data/oauth.sqlite3
-      - key: PUBLIC_BASE_URL
-        value: https://tunnel-8fvo.onrender.com
