@@ -113,6 +113,14 @@ def resolve_target(item):
     target = item.get("target", item.get("target_id", item.get("port", DEFAULT_TARGET)))
     if isinstance(target, int):
         target = str(target)
+    if (
+        isinstance(target, str)
+        and target not in LOCAL_TARGETS
+        and target.startswith("port")
+        and target[4:].isdigit()
+        and target[4:] in LOCAL_TARGETS
+    ):
+        target = target[4:]
     if not isinstance(target, str) or target not in LOCAL_TARGETS:
         raise TargetSelectionError(
             "Unknown local target. Configure it in LOCAL_TARGETS and send its key as 'target'."
