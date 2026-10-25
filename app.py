@@ -26,7 +26,7 @@ app = FastAPI(title="PAO Tunnel Relay")
 
 AGENT_TOKEN = os.environ.get("TUNNEL_AGENT_TOKEN", "")
 PUBLIC_BASE_URL = os.environ.get(
-    "PUBLIC_BASE_URL", "https://tunnell.de.deplexo.com"
+    "PUBLIC_BASE_URL", "https://tunnel-8fvo.onrender.com"
 ).rstrip("/")
 RESOURCE_URL = PUBLIC_BASE_URL + "/t/mcp/nexa"
 RESOURCE_METADATA_URL = PUBLIC_BASE_URL + "/.well-known/oauth-protected-resource/t/mcp/nexa"
