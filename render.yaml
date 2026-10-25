@@ -21,5 +21,3 @@ services:
         sync: false
       - key: OAUTH_DB_PATH
         value: /var/data/oauth.sqlite3
-      - key: PUBLIC_BASE_URL
-        value: https://tunnel-8fvo.onrender.com
