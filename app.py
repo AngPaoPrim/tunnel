@@ -8,12 +8,19 @@ import os
 import secrets
 import time
 import uuid
+from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
 from oauth import install_oauth
 from oauth_store import SQLiteMapping
+
+render_env_file = Path("/etc/secrets/.env")
+if render_env_file.is_file():
+    load_dotenv(render_env_file, override=True)
+load_dotenv(override=True)
 
 app = FastAPI(title="PAO Tunnel Relay")
 
