@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 import httpx
 import websockets
 
-TUNNEL_URL = os.environ.get("TUNNEL_URL", "https://tunnel-6ist.onrender.com").rstrip("/")
+TUNNEL_URL = os.environ.get("TUNNEL_URL", "https://ang.pao.run.place").rstrip("/")
 AGENT_TOKEN = os.environ.get("TUNNEL_AGENT_TOKEN", "")
 LOCAL_TARGET = os.environ.get("LOCAL_TARGET", "http://127.0.0.1:5000").rstrip("/")
 LOCAL_TARGETS_RAW = os.environ.get("LOCAL_TARGETS", "")

@@ -9,6 +9,9 @@ with patch.object(sys.stdin, "isatty", return_value=False):
 
 
 class ResolveTargetTests(unittest.TestCase):
+    def test_default_tunnel_url_uses_active_custom_domain(self):
+        self.assertEqual(client.TUNNEL_URL, "https://ang.pao.run.place")
+
     def test_port_target_resolves_explicit_numeric_key(self):
         with patch.dict(
             client.LOCAL_TARGETS,
