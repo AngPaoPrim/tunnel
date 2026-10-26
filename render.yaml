@@ -18,6 +18,6 @@ services:
       - key: OAUTH_CLIENT_SECRET
         sync: false
       - key: OAUTH_REDIRECT_URIS
-        sync: false
+        value: https://chatgpt.com/connector/oauth/qF7Qqdlytd9q
       - key: OAUTH_DB_PATH
         value: /var/data/oauth.sqlite3
