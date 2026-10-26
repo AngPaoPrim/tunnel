@@ -19,8 +19,7 @@ logger = logging.getLogger(__name__)
 def public_base_url() -> str:
     return (
         os.environ.get("PUBLIC_BASE_URL")
-        or os.environ.get("RENDER_EXTERNAL_URL")
-        or "https://tunnel-8fvo.onrender.com"
+        or "https://ang.pao.run.place"
     ).rstrip("/")
 
 

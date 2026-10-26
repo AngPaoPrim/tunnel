@@ -136,9 +136,10 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(dynamic_authorization.status_code, 200)
         self.assertEqual(static_authorization.status_code, 200)
 
-    async def test_render_external_url_is_used_for_oauth_metadata(self):
+    async def test_custom_domain_is_default_for_oauth_metadata(self):
         render_url = "https://new-service.onrender.com"
         custom_url = "https://ang.pao.run.place"
+        configured_url = "https://configured.example"
         with tempfile.TemporaryDirectory() as storage_dir, patch.dict(
             os.environ,
             {
@@ -147,12 +148,12 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
                 "OAUTH_DB_PATH": os.path.join(storage_dir, "oauth.sqlite3"),
             },
         ):
-            self.assertEqual(public_base_url(), render_url)
+            self.assertEqual(public_base_url(), custom_url)
             with patch.dict(
                 os.environ,
-                {"PUBLIC_BASE_URL": custom_url},
+                {"PUBLIC_BASE_URL": configured_url},
             ):
-                self.assertEqual(public_base_url(), custom_url)
+                self.assertEqual(public_base_url(), configured_url)
             render_app = FastAPI()
             install_oauth(render_app)
             async with httpx.AsyncClient(
@@ -172,14 +173,14 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
                     "/.well-known/openid-configuration"
                 )
 
-        self.assertEqual(protected.json()["resource"], render_url + "/t/mcp/nexa")
+        self.assertEqual(protected.json()["resource"], custom_url + "/t/mcp/nexa")
         self.assertEqual(
-            protected.json()["authorization_servers"], [render_url]
+            protected.json()["authorization_servers"], [custom_url]
         )
         metadata = authorization_server.json()
-        self.assertEqual(metadata["issuer"], render_url)
+        self.assertEqual(metadata["issuer"], custom_url)
         self.assertEqual(
-            metadata["registration_endpoint"], render_url + "/oauth/register"
+            metadata["registration_endpoint"], custom_url + "/oauth/register"
         )
         self.assertEqual(resource_authorization_server.status_code, 200)
         self.assertEqual(resource_authorization_server.json(), metadata)
