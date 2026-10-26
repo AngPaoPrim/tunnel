@@ -4,6 +4,7 @@ import hmac
 import html
 import logging
 import os
+import re
 import secrets
 import time
 from urllib.parse import parse_qsl, unquote_plus, urlencode, urlsplit, urlunsplit
@@ -63,6 +64,25 @@ def install_oauth(app: FastAPI) -> dict[str, dict]:
         return parsed.scheme == "http" and parsed.hostname.lower() in {
             "localhost", "127.0.0.1", "::1"
         }
+
+    def is_chatgpt_connector_redirect(uri: str) -> bool:
+        try:
+            parsed = urlsplit(uri)
+            return (
+                parsed.scheme == "https"
+                and parsed.hostname == "chatgpt.com"
+                and parsed.port is None
+                and parsed.username is None
+                and parsed.password is None
+                and not parsed.query
+                and not parsed.fragment
+                and re.fullmatch(
+                    r"/connector/oauth/[A-Za-z0-9_-]{1,128}", parsed.path
+                )
+                is not None
+            )
+        except ValueError:
+            return False
 
     configured_redirects = [
         uri.strip() for uri in static_redirect_uris.splitlines() if uri.strip()
@@ -198,11 +218,14 @@ def install_oauth(app: FastAPI) -> dict[str, dict]:
                 requested_client_id
                 and len(requested_client_id) <= 128
                 and all(0x21 <= ord(char) <= 0x7E for char in requested_client_id)
-                and redirect_uri in configured_redirects
+                and (
+                    redirect_uri in configured_redirects
+                    or is_chatgpt_connector_redirect(redirect_uri)
+                )
             ):
                 client = {
                     "client_id": requested_client_id,
-                    "redirect_uris": configured_redirects,
+                    "redirect_uris": [redirect_uri],
                     "client_name": "Recovered public client",
                     "token_endpoint_auth_method": "none",
                 }

@@ -380,6 +380,37 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(exchanged.status_code, 200)
 
+    async def test_missing_public_client_accepts_new_chatgpt_callback_path(self):
+        client_id = "chatgpt-public-client"
+        redirect_uri = "https://chatgpt.com/connector/oauth/new-generated-id"
+        authorization, code = await self.authorize(
+            client_id=client_id, redirect_uri=redirect_uri
+        )
+
+        self.assertEqual(authorization.status_code, 200)
+        self.assertIsNotNone(code)
+
+        form = self.token_form(code, client_id=client_id, secret=None)
+        form["redirect_uri"] = redirect_uri
+        exchanged = await self.client.post("/oauth/token", data=form)
+        self.assertEqual(exchanged.status_code, 200)
+
+    async def test_missing_public_client_rejects_untrusted_callback_path(self):
+        response = await self.client.get(
+            "/oauth/authorize",
+            params={
+                "client_id": "chatgpt-public-client",
+                "redirect_uri": "https://attacker.example/connector/oauth/callback",
+                "response_type": "code",
+                "resource": RESOURCE,
+                "scope": "mcp",
+                "code_challenge": CHALLENGE,
+                "code_challenge_method": "S256",
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "invalid_client")
+
     async def test_mcp_bearer_validation_and_target_permissions(self):
         with patch.dict(
             os.environ,
