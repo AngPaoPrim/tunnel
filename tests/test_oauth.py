@@ -138,6 +138,7 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_render_external_url_is_used_for_oauth_metadata(self):
         render_url = "https://new-service.onrender.com"
+        custom_url = "https://ang.pao.run.place"
         with tempfile.TemporaryDirectory() as storage_dir, patch.dict(
             os.environ,
             {
@@ -147,6 +148,11 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
             },
         ):
             self.assertEqual(public_base_url(), render_url)
+            with patch.dict(
+                os.environ,
+                {"PUBLIC_BASE_URL": custom_url},
+            ):
+                self.assertEqual(public_base_url(), custom_url)
             render_app = FastAPI()
             install_oauth(render_app)
             async with httpx.AsyncClient(

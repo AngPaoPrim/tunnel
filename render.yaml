@@ -7,6 +7,8 @@ services:
     startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:
+      - key: PUBLIC_BASE_URL
+        value: https://ang.pao.run.place
       - key: TUNNEL_AGENT_TOKEN
         sync: false
       - key: OAUTH_USERNAME
