@@ -140,6 +140,13 @@ def resolve_target(item):
     if (
         isinstance(target, str)
         and target not in LOCAL_TARGETS
+        and target.isdigit()
+        and "port" + target in LOCAL_TARGETS
+    ):
+        target = "port" + target
+    if (
+        isinstance(target, str)
+        and target not in LOCAL_TARGETS
         and target.startswith("port")
         and target[4:].isdigit()
         and target[4:] in LOCAL_TARGETS

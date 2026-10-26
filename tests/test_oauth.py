@@ -616,8 +616,20 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
             relay.resolve_tunnel_target("ports/default/ws"),
             ("default", "/ws"),
         )
+        self.assertEqual(
+            relay.resolve_tunnel_target("ports/1234/"),
+            ("1234", "/"),
+        )
         with self.assertRaises(relay.HTTPException):
             relay.resolve_tunnel_target("port/70000/socket.io/")
+
+    def test_dynamic_ports_allow_numeric_and_prompted_port_targets(self):
+        relay = importlib.reload(importlib.import_module("app"))
+        token = {"targets": ["dynamic-ports"]}
+
+        self.assertTrue(relay.target_is_permitted("1234", token))
+        self.assertTrue(relay.target_is_permitted("port1234", token))
+        self.assertFalse(relay.target_is_permitted("70000", token))
 
     async def test_duplicate_agent_is_rejected_without_replacing_active_client(self):
         relay = importlib.reload(importlib.import_module("app"))

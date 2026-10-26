@@ -216,11 +216,11 @@ def resolve_tunnel_target(path: str) -> tuple[str, str]:
 
 def target_is_permitted(target: str, token_record: dict) -> bool:
     permitted_targets = token_record.get("targets", [DEFAULT_TARGET])
+    port_number = target[4:] if target.startswith("port") else target
     dynamic_port_target = (
         "dynamic-ports" in permitted_targets
-        and target.startswith("port")
-        and target[4:].isdigit()
-        and 1 <= int(target[4:]) <= 65535
+        and port_number.isdigit()
+        and 1 <= int(port_number) <= 65535
     )
     return target in permitted_targets or dynamic_port_target
 

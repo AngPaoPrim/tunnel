@@ -23,6 +23,17 @@ class ResolveTargetTests(unittest.TestCase):
                 "http://127.0.0.1:8000",
             )
 
+    def test_numeric_target_resolves_prompted_port_key(self):
+        with patch.dict(
+            client.LOCAL_TARGETS,
+            {"port1234": "http://127.0.0.1:1234"},
+            clear=True,
+        ):
+            self.assertEqual(
+                client.resolve_target({"target": "1234"}),
+                "http://127.0.0.1:1234",
+            )
+
     def test_explicit_port_name_takes_precedence(self):
         with patch.dict(
             client.LOCAL_TARGETS,
