@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import importlib
@@ -596,6 +597,93 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(relay.public_access_requested(header_websocket))
         self.assertTrue(relay.public_access_requested(fallback_websocket))
         self.assertFalse(relay.public_access_requested(private_websocket))
+
+    def test_websocket_route_resolves_only_logical_tunnel_targets(self):
+        relay = importlib.reload(importlib.import_module("app"))
+
+        self.assertEqual(
+            relay.resolve_tunnel_target("port/3000/socket.io/"),
+            ("port3000", "/socket.io/"),
+        )
+        self.assertEqual(
+            relay.resolve_tunnel_target("ports/default/ws"),
+            ("default", "/ws"),
+        )
+        with self.assertRaises(relay.HTTPException):
+            relay.resolve_tunnel_target("port/70000/socket.io/")
+
+    async def test_public_websocket_route_relays_frames_to_the_agent(self):
+        relay = importlib.reload(importlib.import_module("app"))
+
+        class Headers:
+            raw = []
+
+            def get(self, name, default=""):
+                return "" if name == "authorization" else default
+
+        class BrowserWebSocket:
+            def __init__(self):
+                self.headers = Headers()
+                self.cookies = {}
+                self.scope = {"subprotocols": []}
+                self.url = SimpleNamespace(query="EIO=4&transport=websocket")
+                self.incoming = asyncio.Queue()
+                self.accepted = asyncio.Event()
+                self.sent = []
+
+            async def accept(self, subprotocol=None):
+                self.subprotocol = subprotocol
+                self.accepted.set()
+
+            async def receive(self):
+                return await self.incoming.get()
+
+            async def send_text(self, value):
+                self.sent.append(("text", value))
+
+            async def send_bytes(self, value):
+                self.sent.append(("bytes", value))
+
+            async def close(self, code=1000, reason=""):
+                self.sent.append(("close", code, reason))
+
+        previous_public_access = relay.agent_public_access
+        previous_agent_ws = relay.agent_ws
+        relay.agent_public_access = True
+        relay.agent_ws = object()
+        browser = BrowserWebSocket()
+        try:
+            task = asyncio.create_task(
+                relay.tunnel_websocket(browser, "port/3000/socket.io/")
+            )
+            opening = await asyncio.wait_for(relay.request_queue.get(), timeout=2)
+            self.assertEqual(opening["type"], "websocket_open")
+            self.assertEqual(opening["target"], "port3000")
+            self.assertEqual(opening["path"], "/socket.io/")
+            self.assertEqual(opening["query"], "EIO=4&transport=websocket")
+
+            response_queue = relay.pending[opening["id"]]
+            await response_queue.put({"type": "websocket_opened"})
+            await asyncio.wait_for(browser.accepted.wait(), timeout=2)
+            await browser.incoming.put(
+                {"type": "websocket.receive", "text": "browser-message"}
+            )
+
+            browser_frame = await asyncio.wait_for(
+                relay.request_queue.get(), timeout=2
+            )
+            self.assertEqual(browser_frame["type"], "websocket_frame")
+            self.assertEqual(browser_frame["text"], "browser-message")
+
+            await response_queue.put(
+                {"type": "websocket_frame", "text": "agent-message"}
+            )
+            await browser.incoming.put({"type": "websocket.disconnect"})
+            await asyncio.wait_for(task, timeout=2)
+            self.assertIn(("text", "agent-message"), browser.sent)
+        finally:
+            relay.agent_public_access = previous_public_access
+            relay.agent_ws = previous_agent_ws
 
 
 if __name__ == "__main__":

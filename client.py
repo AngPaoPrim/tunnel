@@ -57,7 +57,9 @@ DEFAULT_TARGET = os.environ.get("DEFAULT_LOCAL_TARGET", "default").strip() or "d
 
 MAX_BODY = 2 * 1024 * 1024
 CHUNK_SIZE = 64 * 1024
+MAX_WEBSOCKET_FRAME = 2 * 1024 * 1024
 send_lock = asyncio.Lock()
+websocket_sessions = {}
 
 
 class TargetSelectionError(Exception):
@@ -134,6 +136,10 @@ async def send_message(ws, message):
 
 
 async def handle_request(ws, client, item):
+    if item.get("type") == "websocket_open":
+        await handle_websocket_request(ws, item)
+        return
+
     request_id = item.get("id", "")
     response_started = False
 
@@ -227,6 +233,143 @@ async def handle_request(ws, client, item):
             pass
 
 
+async def handle_websocket_request(ws, item):
+    request_id = item.get("id", "")
+    incoming = asyncio.Queue(maxsize=32)
+    websocket_sessions[request_id] = incoming
+    try:
+        target_url = resolve_target(item)
+        parsed_target = urlsplit(target_url)
+        path = item.get("path", "/")
+        query = item.get("query", "")
+        if not isinstance(path, str) or not path.startswith("/") or path.startswith("//"):
+            raise ValueError("Invalid WebSocket path")
+        if not isinstance(query, str) or query.startswith("//"):
+            raise ValueError("Invalid WebSocket query")
+
+        scheme = "wss" if parsed_target.scheme == "https" else "ws"
+        local_path = parsed_target.path.rstrip("/") + path
+        local_url = f"{scheme}://{parsed_target.netloc}{local_path}"
+        if query:
+            local_url += "?" + query
+
+        blocked = {
+            "host", "authorization", "cookie", "connection", "upgrade",
+            "content-length", "transfer-encoding", "proxy-authorization",
+            "proxy-connection",
+        }
+        headers = [
+            (name, value)
+            for name, value in item.get("headers", [])
+            if isinstance(name, str)
+            and name.lower() not in blocked
+            and not name.lower().startswith("sec-websocket-")
+        ]
+        async with websockets.connect(
+            local_url,
+            additional_headers=headers,
+            subprotocols=item.get("subprotocols") or None,
+            open_timeout=15,
+            ping_interval=20,
+            ping_timeout=20,
+            max_size=MAX_WEBSOCKET_FRAME,
+        ) as local_ws:
+            await send_message(
+                ws,
+                {
+                    "id": request_id,
+                    "type": "websocket_opened",
+                    "subprotocol": local_ws.subprotocol,
+                },
+            )
+
+            async def forward_local_messages():
+                try:
+                    async for message in local_ws:
+                        if isinstance(message, bytes):
+                            await send_message(
+                                ws,
+                                {
+                                    "id": request_id,
+                                    "type": "websocket_frame",
+                                    "binary": base64.b64encode(message).decode("ascii"),
+                                },
+                            )
+                        else:
+                            await send_message(
+                                ws,
+                                {
+                                    "id": request_id,
+                                    "type": "websocket_frame",
+                                    "text": message,
+                                },
+                            )
+                finally:
+                    await send_message(
+                        ws,
+                        {
+                            "id": request_id,
+                            "type": "websocket_close",
+                            "code": local_ws.close_code or 1000,
+                            "reason": local_ws.close_reason or "",
+                        },
+                    )
+
+            forward_task = asyncio.create_task(forward_local_messages())
+            try:
+                while not forward_task.done():
+                    receive_task = asyncio.create_task(incoming.get())
+                    done, _ = await asyncio.wait(
+                        {receive_task, forward_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if receive_task not in done:
+                        receive_task.cancel()
+                        await asyncio.gather(receive_task, return_exceptions=True)
+                        break
+                    message = receive_task.result()
+                    if message.get("type") == "websocket_close":
+                        await local_ws.close(
+                            code=int(message.get("code", 1000)),
+                            reason=str(message.get("reason", ""))[:123],
+                        )
+                        break
+                    if message.get("type") != "websocket_frame":
+                        continue
+                    if "binary" in message:
+                        frame = base64.b64decode(message["binary"], validate=True)
+                    else:
+                        frame = message.get("text", "")
+                    frame_size = (
+                        len(frame)
+                        if isinstance(frame, bytes)
+                        else len(frame.encode("utf-8"))
+                    )
+                    if frame_size > MAX_WEBSOCKET_FRAME:
+                        await local_ws.close(code=1009, reason="WebSocket frame too large")
+                        break
+                    await local_ws.send(frame)
+            finally:
+                forward_task.cancel()
+                await asyncio.gather(forward_task, return_exceptions=True)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        try:
+            await send_message(
+                ws,
+                {
+                    "id": request_id,
+                    "type": "websocket_open_failed",
+                    "error": str(exc)[:200],
+                },
+            )
+        except Exception:
+            pass
+    finally:
+        websocket_sessions.pop(request_id, None)
+
+
 async def run():
     if not TUNNEL_URL.startswith("https://"):
         raise RuntimeError("TUNNEL_URL must start with https://")
@@ -266,6 +409,14 @@ async def run():
                     tasks = set()
                     async for raw in ws:
                         item = json.loads(raw)
+                        if item.get("type") in {
+                            "websocket_frame",
+                            "websocket_close",
+                        }:
+                            session = websocket_sessions.get(item.get("id", ""))
+                            if session is not None:
+                                await session.put(item)
+                            continue
                         task = asyncio.create_task(
                             handle_request(ws, client, item)
                         )

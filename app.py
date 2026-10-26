@@ -196,6 +196,57 @@ def public_access_requested(ws: WebSocket) -> bool:
     )
 
 
+def resolve_tunnel_target(path: str) -> tuple[str, str]:
+    if path == "mcp/nexa":
+        return DEFAULT_TARGET, "/mcp/nexa"
+    if path.startswith("port/"):
+        parts = path.split("/", 2)
+        if len(parts) < 2 or not parts[1].isdigit() or not 1 <= int(parts[1]) <= 65535:
+            raise HTTPException(status_code=404, detail="Unknown tunnel port")
+        return "port" + parts[1], "/" + parts[2] if len(parts) == 3 and parts[2] else "/"
+    if path.startswith("ports/"):
+        parts = path.split("/", 2)
+        if len(parts) < 2 or not parts[1] or any(
+            not (ch.isalnum() or ch in "-_.") for ch in parts[1]
+        ):
+            raise HTTPException(status_code=404, detail="Unknown tunnel target")
+        return parts[1], "/" + parts[2] if len(parts) == 3 and parts[2] else "/"
+    raise HTTPException(status_code=404, detail="Unknown tunnel resource")
+
+
+def target_is_permitted(target: str, token_record: dict) -> bool:
+    permitted_targets = token_record.get("targets", [DEFAULT_TARGET])
+    dynamic_port_target = (
+        "dynamic-ports" in permitted_targets
+        and target.startswith("port")
+        and target[4:].isdigit()
+        and 1 <= int(target[4:]) <= 65535
+    )
+    return target in permitted_targets or dynamic_port_target
+
+
+def websocket_access_token(path: str, websocket: WebSocket):
+    bearer_token = websocket.headers.get("authorization", "")
+    if bearer_token.lower().startswith("bearer "):
+        bearer_token = bearer_token[7:].strip()
+    if agent_public_access and not bearer_token and path != "mcp/nexa":
+        configured_targets = os.environ.get("OAUTH_ALLOWED_TARGETS", "default")
+        return {
+            "resource": RESOURCE_URL,
+            "scope": "mcp",
+            "targets": sorted(
+                set(
+                    [DEFAULT_TARGET, "dynamic-ports"]
+                    + [item.strip() for item in configured_targets.split(",") if item.strip()]
+                )
+            ),
+            "expires_at": time.time() + 3600,
+        }
+    return access_tokens.get(
+        bearer_token or websocket.cookies.get("nexa_browser_session", "")
+    )
+
+
 @app.websocket("/_tunnel/agent")
 async def agent_endpoint(ws: WebSocket):
     global agent_ws, agent_public_access
@@ -226,7 +277,10 @@ async def agent_endpoint(ws: WebSocket):
         while True:
             item = await request_queue.get()
             try:
-                if item["id"] not in pending:
+                if (
+                    item["id"] not in pending
+                    and item.get("type") != "websocket_close"
+                ):
                     continue
                 await ws.send_text(json.dumps(item))
             finally:
@@ -255,6 +309,137 @@ async def agent_endpoint(ws: WebSocket):
             if agent_ws is ws:
                 agent_ws = None
                 agent_public_access = False
+
+
+@app.websocket("/t/{path:path}")
+async def tunnel_websocket(websocket: WebSocket, path: str):
+    token_record = websocket_access_token(path, websocket)
+    if (
+        token_record is None
+        or token_record["expires_at"] < time.time()
+        or token_record["resource"] != RESOURCE_URL
+        or token_record["scope"] != "mcp"
+    ):
+        await websocket.close(code=1008, reason="Unauthorized")
+        return
+    try:
+        target, local_path = resolve_tunnel_target(path)
+    except HTTPException as exc:
+        await websocket.close(code=1008, reason=exc.detail)
+        return
+    if not target_is_permitted(target, token_record):
+        await websocket.close(code=1008, reason="Target not permitted")
+        return
+    if agent_ws is None:
+        await websocket.close(code=1013, reason="Tunnel client offline")
+        return
+
+    request_id = uuid.uuid4().hex
+    response_queue = asyncio.Queue(maxsize=32)
+    pending[request_id] = response_queue
+    blocked = HOP_HEADERS | {"host", "authorization", "cookie", "proxy-authorization"}
+    forwarded_headers = [
+        [name.decode("latin-1"), value.decode("latin-1")]
+        for name, value in websocket.headers.raw
+        if name.decode("latin-1").lower() not in blocked
+    ]
+    try:
+        request_queue.put_nowait(
+            {
+                "id": request_id,
+                "type": "websocket_open",
+                "target": target,
+                "path": local_path,
+                "query": str(websocket.url.query),
+                "headers": forwarded_headers,
+                "subprotocols": websocket.scope.get("subprotocols", []),
+            }
+        )
+    except asyncio.QueueFull:
+        pending.pop(request_id, None)
+        await websocket.close(code=1013, reason="Tunnel queue full")
+        return
+
+    try:
+        opened = await asyncio.wait_for(response_queue.get(), timeout=15)
+        if opened.get("type") != "websocket_opened":
+            await websocket.close(code=1011, reason="Local WebSocket connection failed")
+            return
+        await websocket.accept(subprotocol=opened.get("subprotocol"))
+
+        while True:
+            browser_receive = asyncio.create_task(websocket.receive())
+            agent_receive = asyncio.create_task(response_queue.get())
+            done, waiting = await asyncio.wait(
+                {browser_receive, agent_receive},
+                timeout=REQUEST_TIMEOUT,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in waiting:
+                task.cancel()
+            if waiting:
+                await asyncio.gather(*waiting, return_exceptions=True)
+            if not done:
+                raise asyncio.TimeoutError
+            if agent_receive in done:
+                result = agent_receive.result()
+                if result.get("type") == "websocket_frame":
+                    if "binary" in result:
+                        await websocket.send_bytes(
+                            base64.b64decode(result["binary"], validate=True)
+                        )
+                    else:
+                        await websocket.send_text(result.get("text", ""))
+                elif result.get("type") == "websocket_close":
+                    await websocket.close(
+                        code=int(result.get("code", 1000)),
+                        reason=str(result.get("reason", ""))[:123],
+                    )
+                    break
+            if browser_receive in done:
+                message = browser_receive.result()
+                if message["type"] == "websocket.disconnect":
+                    break
+                if message.get("text") is not None:
+                    if len(message["text"].encode("utf-8")) > 2 * 1024 * 1024:
+                        await websocket.close(
+                            code=1009, reason="WebSocket frame too large"
+                        )
+                        break
+                    item = {
+                        "id": request_id,
+                        "type": "websocket_frame",
+                        "text": message["text"],
+                    }
+                elif message.get("bytes") is not None:
+                    if len(message["bytes"]) > 2 * 1024 * 1024:
+                        await websocket.close(
+                            code=1009, reason="WebSocket frame too large"
+                        )
+                        break
+                    item = {
+                        "id": request_id,
+                        "type": "websocket_frame",
+                        "binary": base64.b64encode(message["bytes"]).decode("ascii"),
+                    }
+                else:
+                    continue
+                try:
+                    request_queue.put_nowait(item)
+                except asyncio.QueueFull:
+                    await websocket.close(code=1013, reason="Tunnel queue full")
+                    break
+    except asyncio.TimeoutError:
+        await websocket.close(code=1011, reason="Local WebSocket timed out")
+    finally:
+        pending.pop(request_id, None)
+        if agent_ws is not None:
+            try:
+                request_queue.put_nowait(
+                    {"id": request_id, "type": "websocket_close", "code": 1000}
+                )
+            except asyncio.QueueFull:
+                pass
 
 
 @app.api_route("/t", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
@@ -315,42 +500,13 @@ async def tunnel(request: Request, path: str = ""):
                 "Cache-Control": "no-store",
             },
         )
-    # Keep the original MCP route working. Additional local services use:
-    # /t/ports/{target}/{local-path}. The target is a logical allow-listed name,
-    # never a caller-supplied URL or arbitrary port number.
-    if path == "mcp/nexa":
-        target = DEFAULT_TARGET
-        local_path = "/mcp/nexa"
-    elif path.startswith("port/"):
-        parts = path.split("/", 2)
-        if len(parts) < 2 or not parts[1].isdigit() or not 1 <= int(parts[1]) <= 65535:
-            raise HTTPException(status_code=404, detail="Unknown tunnel port")
-        target = "port" + parts[1]
-        local_path = "/" + parts[2] if len(parts) == 3 and parts[2] else "/"
-        if len(parts) == 2 and request.method in {"GET", "HEAD"}:
-            location = request.url.path + "/"
-            if request.url.query:
-                location += "?" + request.url.query
-            return RedirectResponse(location, status_code=307)
-    elif path.startswith("ports/"):
-        parts = path.split("/", 2)
-        if len(parts) < 2 or not parts[1] or any(
-            not (ch.isalnum() or ch in "-_.") for ch in parts[1]
-        ):
-            raise HTTPException(status_code=404, detail="Unknown tunnel target")
-        target = parts[1]
-        local_path = "/" + parts[2] if len(parts) == 3 and parts[2] else "/"
-    else:
-        raise HTTPException(status_code=404, detail="Unknown tunnel resource")
-
-    permitted_targets = token_record.get("targets", [DEFAULT_TARGET])
-    dynamic_port_target = (
-        "dynamic-ports" in permitted_targets
-        and target.startswith("port")
-        and target[4:].isdigit()
-        and 1 <= int(target[4:]) <= 65535
-    )
-    if target not in permitted_targets and not dynamic_port_target:
+    target, local_path = resolve_tunnel_target(path)
+    if path.startswith("port/") and path.count("/") == 1 and request.method in {"GET", "HEAD"}:
+        location = request.url.path + "/"
+        if request.url.query:
+            location += "?" + request.url.query
+        return RedirectResponse(location, status_code=307)
+    if not target_is_permitted(target, token_record):
         raise HTTPException(status_code=403, detail="Target not permitted for this OAuth token")
 
     if agent_ws is None:
