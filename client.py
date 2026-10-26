@@ -2,7 +2,9 @@ import asyncio
 import base64
 import json
 import os
+import random
 import sys
+import time
 from urllib.parse import urlsplit
 
 import httpx
@@ -12,6 +14,7 @@ TUNNEL_URL = os.environ.get("TUNNEL_URL", "https://ang.pao.run.place").rstrip("/
 AGENT_TOKEN = os.environ.get("TUNNEL_AGENT_TOKEN", "")
 LOCAL_TARGET = os.environ.get("LOCAL_TARGET", "http://127.0.0.1:5000").rstrip("/")
 LOCAL_TARGETS_RAW = os.environ.get("LOCAL_TARGETS", "")
+LOCAL_PORTS_RAW = os.environ.get("LOCAL_PORTS", "")
 PUBLIC_ACCESS = False
 if sys.stdin.isatty():
     while True:
@@ -28,36 +31,55 @@ if sys.stdin.isatty():
             break
         print("Please enter Y or N.")
 
-# Interactive port selection: enter local ports as comma-separated numbers.
-# These are mapped only to localhost, never to caller-supplied remote URLs.
+
+def add_local_port_targets(targets, raw_ports):
+    """Add localhost targets for a comma- or semicolon-separated port list."""
+    for raw_port in raw_ports.replace(";", ",").split(","):
+        raw_port = raw_port.strip()
+        if not raw_port:
+            continue
+        if not raw_port.isdigit() or not 1 <= int(raw_port) <= 65535:
+            print(f"Skipping invalid port: {raw_port}")
+            continue
+        port = int(raw_port)
+        targets[f"port{port}"] = f"http://127.0.0.1:{port}"
+    return targets
+
+
+# Extra targets are always mapped to localhost; caller-supplied URLs are not used.
+extra_ports = LOCAL_PORTS_RAW
 if sys.stdin.isatty():
     try:
-        extra_ports = input("Add local ports to tunnel (comma-separated, e.g. 3737; Enter to skip): ").strip()
+        prompted_ports = input(
+            "Add local ports to tunnel (comma-separated, e.g. 3737,8080; Enter to skip): "
+        ).strip()
     except (EOFError, KeyboardInterrupt):
-        extra_ports = ""
-    if extra_ports:
-        try:
-            extra_targets = json.loads(LOCAL_TARGETS_RAW) if LOCAL_TARGETS_RAW.strip() else {}
-            if not isinstance(extra_targets, dict):
-                raise ValueError("LOCAL_TARGETS must be a JSON object")
-            for raw_port in extra_ports.replace(";", ",").split(","):
-                raw_port = raw_port.strip()
-                if not raw_port:
-                    continue
-                if not raw_port.isdigit() or not 1 <= int(raw_port) <= 65535:
-                    print(f"Skipping invalid port: {raw_port}")
-                    continue
-                port = int(raw_port)
-                extra_targets[f"port{port}"] = f"http://127.0.0.1:{port}"
-            LOCAL_TARGETS_RAW = json.dumps(extra_targets)
-        except (ValueError, json.JSONDecodeError) as exc:
-            print(f"Could not parse additional ports: {exc}")
-            raise SystemExit(2)
+        prompted_ports = ""
+    if prompted_ports:
+        extra_ports = ",".join(part for part in (extra_ports, prompted_ports) if part)
+
+if extra_ports.strip():
+    try:
+        extra_targets = json.loads(LOCAL_TARGETS_RAW) if LOCAL_TARGETS_RAW.strip() else {}
+        if not isinstance(extra_targets, dict):
+            raise ValueError("LOCAL_TARGETS must be a JSON object")
+        LOCAL_TARGETS_RAW = json.dumps(
+            add_local_port_targets(extra_targets, extra_ports)
+        )
+    except (ValueError, json.JSONDecodeError) as exc:
+        print(f"Could not parse additional ports: {exc}")
+        raise SystemExit(2)
 DEFAULT_TARGET = os.environ.get("DEFAULT_LOCAL_TARGET", "default").strip() or "default"
 
 MAX_BODY = 2 * 1024 * 1024
 CHUNK_SIZE = 64 * 1024
 MAX_WEBSOCKET_FRAME = 2 * 1024 * 1024
+TUNNEL_PING_INTERVAL = 20
+TUNNEL_PING_TIMEOUT = 60
+RECONNECT_INITIAL_DELAY = 3
+RECONNECT_MAX_DELAY = 30
+RECONNECT_JITTER = 0.2
+CONNECTION_STABLE_SECONDS = 60
 send_lock = asyncio.Lock()
 websocket_sessions = {}
 
@@ -390,7 +412,10 @@ async def run():
 
     timeout = httpx.Timeout(connect=15, read=None, write=30, pool=15)
     async with httpx.AsyncClient(timeout=timeout) as client:
+        reconnect_delay = RECONNECT_INITIAL_DELAY
         while True:
+            connected_at = None
+            tasks = set()
             try:
                 print("Connecting to", ws_url)
 
@@ -400,13 +425,14 @@ async def run():
                         "Authorization": f"Bearer {AGENT_TOKEN}",
                         "X-Tunnel-Public-Access": str(PUBLIC_ACCESS).lower(),
                     },
-                    ping_interval=20,
-                    ping_timeout=20,
+                    open_timeout=30,
+                    ping_interval=TUNNEL_PING_INTERVAL,
+                    ping_timeout=TUNNEL_PING_TIMEOUT,
                     max_size=4 * 1024 * 1024,
                 ) as ws:
                     print("Tunnel connected")
 
-                    tasks = set()
+                    connected_at = time.monotonic()
                     async for raw in ws:
                         item = json.loads(raw)
                         if item.get("type") in {
@@ -423,6 +449,7 @@ async def run():
                         tasks.add(task)
                         task.add_done_callback(tasks.discard)
 
+                print("Tunnel connection closed.")
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -436,8 +463,28 @@ async def run():
                     return
 
                 print("Disconnected:", repr(exc))
-                print("Retrying in 3 seconds...")
-                await asyncio.sleep(3)
+            finally:
+                for task in tasks:
+                    task.cancel()
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+
+            if (
+                connected_at is not None
+                and time.monotonic() - connected_at >= CONNECTION_STABLE_SECONDS
+            ):
+                reconnect_delay = RECONNECT_INITIAL_DELAY
+
+            retry_delay = min(
+                RECONNECT_MAX_DELAY,
+                random.uniform(
+                    reconnect_delay * (1 - RECONNECT_JITTER),
+                    reconnect_delay * (1 + RECONNECT_JITTER),
+                ),
+            )
+            print(f"Retrying in {retry_delay:.1f} seconds...")
+            await asyncio.sleep(retry_delay)
+            reconnect_delay = min(reconnect_delay * 2, RECONNECT_MAX_DELAY)
 
 
 if __name__ == "__main__":

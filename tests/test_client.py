@@ -42,6 +42,26 @@ class ResolveTargetTests(unittest.TestCase):
             with self.assertRaises(client.TargetSelectionError):
                 client.resolve_target({"target": "port8000"})
 
+    def test_multiple_local_ports_are_added_as_independent_targets(self):
+        targets = client.add_local_port_targets({}, "3737,8080; 3737")
+
+        self.assertEqual(
+            targets,
+            {
+                "port3737": "http://127.0.0.1:3737",
+                "port8080": "http://127.0.0.1:8080",
+            },
+        )
+        with patch.dict(client.LOCAL_TARGETS, targets, clear=True):
+            self.assertEqual(
+                client.resolve_target({"target": "port3737"}),
+                "http://127.0.0.1:3737",
+            )
+            self.assertEqual(
+                client.resolve_target({"target": "port8080"}),
+                "http://127.0.0.1:8080",
+            )
+
 
 class WebSocketRelayTests(unittest.IsolatedAsyncioTestCase):
     async def test_websocket_frames_are_forwarded_to_local_target(self):
@@ -103,6 +123,68 @@ class WebSocketRelayTests(unittest.IsolatedAsyncioTestCase):
                     {"type": "websocket_close", "code": 1000}
                 )
                 await asyncio.wait_for(task, timeout=3)
+
+
+class TunnelReconnectTests(unittest.IsolatedAsyncioTestCase):
+    async def test_clean_disconnect_uses_exponential_backoff(self):
+        delays = []
+
+        class FakeWebSocket:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise StopAsyncIteration
+
+        class FakeConnection:
+            async def __aenter__(self):
+                return FakeWebSocket()
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+        class FakeHttpClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+        async def capture_delay(delay):
+            delays.append(delay)
+            if len(delays) == 6:
+                raise asyncio.CancelledError
+
+        with (
+            patch.object(client, "AGENT_TOKEN", "test-token"),
+            patch.object(
+                client.httpx,
+                "AsyncClient",
+                return_value=FakeHttpClient(),
+            ),
+            patch.object(
+                client.websockets,
+                "connect",
+                side_effect=lambda *args, **kwargs: FakeConnection(),
+            ) as connect,
+            patch.object(
+                client.asyncio,
+                "sleep",
+                side_effect=capture_delay,
+            ),
+            patch.object(
+                client.random,
+                "uniform",
+                side_effect=lambda lower, upper: upper,
+            ),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await client.run()
+
+        for actual, expected in zip(delays, [3.6, 7.2, 14.4, 28.8, 30, 30]):
+            self.assertAlmostEqual(actual, expected)
+        self.assertEqual(connect.call_args.kwargs["ping_interval"], 20)
+        self.assertEqual(connect.call_args.kwargs["ping_timeout"], 60)
 
 
 if __name__ == "__main__":
