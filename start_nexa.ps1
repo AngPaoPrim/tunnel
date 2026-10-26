@@ -18,16 +18,20 @@ if (Test-Path $venvPython) {
 }
 
 $previousToken = $env:TUNNEL_AGENT_TOKEN
+$previousTunnelUrl = $env:TUNNEL_URL
+$relayUrl = "https://ang.pao.run.place"
 $exitCode = 1
 
 try {
     $secureToken = Read-Host "Enter the TUNNEL_AGENT_TOKEN from Render" -AsSecureString
     $env:TUNNEL_AGENT_TOKEN = (New-Object System.Net.NetworkCredential("", $secureToken)).Password
+    $env:TUNNEL_URL = $relayUrl
 
     if ([string]::IsNullOrWhiteSpace($env:TUNNEL_AGENT_TOKEN)) {
         throw "TUNNEL_AGENT_TOKEN cannot be empty."
     }
 
+    Write-Host "Relay: $relayUrl"
     Write-Host "Starting PAO tunnel client..."
     & $pythonPath $clientPath
     $exitCode = $LASTEXITCODE
@@ -36,6 +40,11 @@ try {
         Remove-Item Env:TUNNEL_AGENT_TOKEN -ErrorAction SilentlyContinue
     } else {
         $env:TUNNEL_AGENT_TOKEN = $previousToken
+    }
+    if ($null -eq $previousTunnelUrl) {
+        Remove-Item Env:TUNNEL_URL -ErrorAction SilentlyContinue
+    } else {
+        $env:TUNNEL_URL = $previousTunnelUrl
     }
 }
 
