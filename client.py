@@ -453,6 +453,17 @@ async def run():
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                if (
+                    getattr(exc, "code", None) == 1013
+                    and getattr(exc, "reason", "")
+                    == "Tunnel agent already connected"
+                ):
+                    print(
+                        "Another tunnel client is already connected. "
+                        "Close the duplicate client and keep only one running."
+                    )
+                    return
+
                 response = getattr(exc, "response", None)
                 if getattr(response, "status_code", None) in {401, 403}:
                     print("Authentication rejected (HTTP 403).")

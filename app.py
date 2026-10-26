@@ -260,18 +260,12 @@ async def agent_endpoint(ws: WebSocket):
         return
 
     await ws.accept()
-    public_access = public_access_requested(ws)
-
     async with agent_lock:
-        previous = agent_ws
+        if agent_ws is not None:
+            await ws.close(code=1013, reason="Tunnel agent already connected")
+            return
         agent_ws = ws
-        agent_public_access = public_access
-
-    if previous is not None and previous is not ws:
-        try:
-            await previous.close(code=1000, reason="Replaced")
-        except Exception:
-            pass
+        agent_public_access = public_access_requested(ws)
 
     async def sender():
         while True:

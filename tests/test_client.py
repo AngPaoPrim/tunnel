@@ -126,6 +126,44 @@ class WebSocketRelayTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TunnelReconnectTests(unittest.IsolatedAsyncioTestCase):
+    async def test_duplicate_agent_connection_stops_retrying(self):
+        class DuplicateConnectionError(Exception):
+            code = 1013
+            reason = "Tunnel agent already connected"
+
+        class FakeConnection:
+            async def __aenter__(self):
+                raise DuplicateConnectionError
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+        class FakeHttpClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+        with (
+            patch.object(client, "AGENT_TOKEN", "test-token"),
+            patch.object(
+                client.httpx,
+                "AsyncClient",
+                return_value=FakeHttpClient(),
+            ),
+            patch.object(
+                client.websockets,
+                "connect",
+                return_value=FakeConnection(),
+            ) as connect,
+            patch.object(client.asyncio, "sleep") as sleep,
+        ):
+            await client.run()
+
+        connect.assert_called_once()
+        sleep.assert_not_awaited()
+
     async def test_clean_disconnect_uses_exponential_backoff(self):
         delays = []
 

@@ -619,6 +619,47 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(relay.HTTPException):
             relay.resolve_tunnel_target("port/70000/socket.io/")
 
+    async def test_duplicate_agent_is_rejected_without_replacing_active_client(self):
+        relay = importlib.reload(importlib.import_module("app"))
+
+        class AgentWebSocket:
+            def __init__(self):
+                self.headers = {
+                    "authorization": "Bearer test-agent-token",
+                    "x-tunnel-public-access": "false",
+                }
+                self.query_params = {}
+                self.accepted = asyncio.Event()
+                self.closed = []
+
+            async def accept(self):
+                self.accepted.set()
+
+            async def close(self, code=1000, reason=""):
+                self.closed.append((code, reason))
+
+            async def receive_text(self):
+                await asyncio.Future()
+
+        with patch.object(relay, "AGENT_TOKEN", "test-agent-token"):
+            active = AgentWebSocket()
+            duplicate = AgentWebSocket()
+            active_task = asyncio.create_task(relay.agent_endpoint(active))
+            try:
+                await asyncio.wait_for(active.accepted.wait(), timeout=2)
+                await relay.agent_endpoint(duplicate)
+
+                self.assertIs(relay.agent_ws, active)
+                self.assertEqual(
+                    duplicate.closed,
+                    [(1013, "Tunnel agent already connected")],
+                )
+            finally:
+                active_task.cancel()
+                await asyncio.gather(active_task, return_exceptions=True)
+
+            self.assertIsNone(relay.agent_ws)
+
     async def test_public_websocket_route_relays_frames_to_the_agent(self):
         relay = importlib.reload(importlib.import_module("app"))
 
