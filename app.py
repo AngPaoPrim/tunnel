@@ -184,8 +184,16 @@ async def health():
     return {
         "status": "ok",
         "agent_connected": connected,
+        "public_access": connected and agent_public_access,
         "pending_requests": len(pending),
     }
+
+
+def public_access_requested(ws: WebSocket) -> bool:
+    return (
+        ws.headers.get("x-tunnel-public-access", "").lower() == "true"
+        or ws.query_params.get("public_access", "").lower() == "true"
+    )
 
 
 @app.websocket("/_tunnel/agent")
@@ -201,9 +209,7 @@ async def agent_endpoint(ws: WebSocket):
         return
 
     await ws.accept()
-    public_access = (
-        ws.headers.get("x-tunnel-public-access", "").lower() == "true"
-    )
+    public_access = public_access_requested(ws)
 
     async with agent_lock:
         previous = agent_ws

@@ -6,6 +6,7 @@ import re
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
 
@@ -553,6 +554,7 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
     async def test_public_site_access_skips_login_but_keeps_mcp_protected(self):
         relay = importlib.reload(importlib.import_module("app"))
         previous_public_access = relay.agent_public_access
+        previous_agent_ws = relay.agent_ws
         relay.agent_public_access = True
         try:
             async with httpx.AsyncClient(
@@ -565,12 +567,35 @@ class OAuthTests(unittest.IsolatedAsyncioTestCase):
                 mcp = await browser.get(
                     "/t/mcp/nexa", headers={"Accept": "application/json"}
                 )
+                relay.agent_ws = object()
+                health = await browser.get("/health")
 
             self.assertEqual(website.status_code, 503)
             self.assertNotIn("/t/login", website.headers.get("location", ""))
             self.assertEqual(mcp.status_code, 401)
+            self.assertTrue(health.json()["public_access"])
         finally:
             relay.agent_public_access = previous_public_access
+            relay.agent_ws = previous_agent_ws
+
+    def test_public_access_query_parameter_is_fallback_for_websocket_header(self):
+        relay = importlib.reload(importlib.import_module("app"))
+        header_websocket = SimpleNamespace(
+            headers={"x-tunnel-public-access": "true"},
+            query_params={"public_access": "false"},
+        )
+        fallback_websocket = SimpleNamespace(
+            headers={"x-tunnel-public-access": "false"},
+            query_params={"public_access": "true"},
+        )
+        private_websocket = SimpleNamespace(
+            headers={"x-tunnel-public-access": "false"},
+            query_params={"public_access": "false"},
+        )
+
+        self.assertTrue(relay.public_access_requested(header_websocket))
+        self.assertTrue(relay.public_access_requested(fallback_websocket))
+        self.assertFalse(relay.public_access_requested(private_websocket))
 
 
 if __name__ == "__main__":
